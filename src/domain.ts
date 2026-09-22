@@ -1,11 +1,11 @@
 export type Member = { id: string; name: string; role: 'parent' | 'child'; color: number };
-export type Course = { id: string; memberId: string; name: string; strength: string; amount: number; unit: string; startDate: string; days: number; times: string[]; instructions: string; stoppedAt?: string };
-export type Dose = { id: string; courseId: string; slot: string; actualAt: string; recordedAt: string; by: string; amount: number; unit: string; status: 'given' | 'skipped'; note: string; voidedAt?: string; voidReason?: string };
+export type Course = { id: string; memberId: string; name: string; strength: string; amount: number; unit: string; startDate: string; days: number; times: string[]; intervalHours?: number; instructions: string; stoppedAt?: string };
+export type Dose = { id: string; courseId: string; slot: string; actualAt: string; recordedAt: string; by: string; amount: number; unit: string; status: 'given' | 'skipped'; note: string; voidedAt?: string; voidReason?: string; edits?: { at: string; previous: Omit<Dose, 'edits'> }[] };
 export type FamilyEvent = { id: string; title: string; startsAt: string; endsAt: string; memberIds: string[]; category: 'school' | 'play' | 'family' | 'appointment'; location: string; notes: string };
 export type CaptureNote = { id: string; text: string; memberId: string; createdAt: string; image?: string };
 export type FamilyData = { members: Member[]; courses: Course[]; doses: Dose[]; events: FamilyEvent[]; notes: CaptureNote[] };
 export type Slot = { key: string; at: Date; course: Course; record?: Dose };
-export type Operation = { type: 'member'; value: Member } | { type: 'course'; value: Course } | { type: 'dose'; value: Dose } | { type: 'stop'; id: string; at: string } | { type: 'void'; id: string; reason: string; at: string } | { type: 'event'; value: FamilyEvent } | { type: 'deleteEvent'; id: string } | { type: 'note'; value: CaptureNote } | { type: 'deleteNote'; id: string };
+export type Operation = { type: 'member'; value: Member } | { type: 'course'; value: Course } | { type: 'courses'; values: Course[] } | { type: 'dose'; value: Dose } | { type: 'doses'; values: Dose[] } | { type: 'editDose'; value: Dose } | { type: 'stop'; id: string; at: string } | { type: 'void'; id: string; reason: string; at: string } | { type: 'event'; value: FamilyEvent } | { type: 'deleteEvent'; id: string } | { type: 'note'; value: CaptureNote } | { type: 'deleteNote'; id: string };
 
 export const uid = () => crypto.randomUUID();
 export const dateKey = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -22,6 +22,17 @@ export function demoFamily(): FamilyData {
 }
 export function slotsForCourse(course: Course, doses: Dose[], from?: string, to?: string): Slot[] {
   const result: Slot[] = [];
+  if (course.intervalHours) {
+    const first = new Date(`${course.startDate}T${course.times[0]}`);
+    const end = new Date(`${addDays(course.startDate, course.days)}T00:00`);
+    for (let at = first; at < end; at = new Date(+at + course.intervalHours * 3600000)) {
+      const day = dateKey(at); if ((from && day < from) || (to && day > to)) continue;
+      if (course.stoppedAt && at >= new Date(course.stoppedAt)) continue;
+      const slot = `${day}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+      result.push({ key: slot, at, course, record: doses.find(d => d.courseId === course.id && d.slot === slot && !d.voidedAt) });
+    }
+    return result;
+  }
   for (let day = 0; day < course.days; day++) {
     const key = addDays(course.startDate, day);
     if ((from && key < from) || (to && key > to)) continue;
@@ -38,18 +49,36 @@ const ensure = (condition: unknown, message: string) => { if (!condition) throw 
 export function applyOperation(data: FamilyData, op: Operation): FamilyData {
   switch (op.type) {
     case 'member': ensure(op.value.name.trim() && op.value.name.length <= 40, 'Enter a name of 1–40 characters.'); return { ...data, members: data.members.some(m => m.id === op.value.id) ? data.members.map(m => m.id === op.value.id ? op.value : m) : [...data.members, op.value] };
+    case 'courses': {
+      ensure(op.values.length > 0 && op.values.length <= data.members.length, 'Choose at least one family member.');
+      return op.values.reduce((next, value) => applyOperation(next, { type: 'course', value }), data);
+    }
     case 'course': {
       const c = op.value; ensure(data.members.some(m => m.id === c.memberId), 'Choose a family member.'); ensure(c.name.trim() && c.strength.trim(), 'Enter the medicine name and strength from the label.');
       ensure(Number.isFinite(c.amount) && c.amount > 0 && c.unit.trim(), 'Enter a positive amount and its unit.');
       ensure(Number.isInteger(c.days) && c.days >= 1 && c.days <= 90, 'Courses can be 1–90 days.');
       ensure(/^\d{4}-\d{2}-\d{2}$/.test(c.startDate) && !isNaN(+localDate(c.startDate)) && dateKey(localDate(c.startDate)) === c.startDate, 'Choose a valid start date.');
       ensure(c.times.length > 0 && c.times.length <= 8 && c.times.every(t => /^([01]\d|2[0-3]):[0-5]\d$/.test(t)) && new Set(c.times).size === c.times.length, 'Choose 1–8 different, valid dose times.');
+      ensure(!c.intervalHours || (Number.isInteger(c.intervalHours) && c.intervalHours >= 1 && c.intervalHours <= 24 && c.times.length === 1), 'Choose an interval of 1–24 hours and a first dose time.');
       ensure(!data.courses.some(x => x.id === c.id), 'This course has already been saved.'); return { ...data, courses: [...data.courses, c] };
+    }
+    case 'doses': {
+      ensure(op.values.length > 0 && op.values.length <= data.members.length, 'Choose at least one family member.');
+      return op.values.reduce((next, value) => applyOperation(next, { type: 'dose', value }), data);
+    }
+    case 'editDose': {
+      const old = data.doses.find(d => d.id === op.value.id && !d.voidedAt);
+      ensure(old, 'This dose could not be found. Refresh and try again.');
+      const without = { ...data, doses: data.doses.filter(d => d.id !== old!.id) };
+      const checked = applyOperation(without, { type: 'dose', value: op.value });
+      const { edits: _edits, ...previous } = old!;
+      return { ...checked, doses: checked.doses.map(d => d.id === old!.id ? { ...d, edits: [...(old!.edits || []), { at: new Date().toISOString(), previous }] } : d) };
     }
     case 'dose': {
       const d = op.value; const course = data.courses.find(c => c.id === d.courseId);
       ensure(course, 'This medicine course no longer exists.');
-      ensure(slotsForCourse(course!, []).some(s => s.key === d.slot), 'This dose is outside the active course.');
+      const withinDates = d.slot.slice(0, 10) >= course!.startDate && d.slot.slice(0, 10) < addDays(course!.startDate, course!.days);
+      ensure(withinDates && /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/.test(d.slot) && (!course!.stoppedAt || new Date(d.slot) < new Date(course!.stoppedAt)), 'This dose is outside the active course.');
       ensure(!data.doses.some(x => x.courseId === d.courseId && x.slot === d.slot && !x.voidedAt), 'This dose has already been recorded. Refresh to see the latest entry.');
       ensure(!isNaN(Date.parse(d.actualAt)) && Date.parse(d.actualAt) <= Date.now() + 60000, 'A dose cannot be recorded in the future.');
       ensure(d.by.trim(), 'Choose who is recording this dose.');
